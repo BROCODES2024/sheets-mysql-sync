@@ -22,8 +22,20 @@ const pool = mysql.createPool({
 });
 
 // 2. Google Sheets Authentication
+// NEW CODE (Production Safe)
+let credentials;
+try {
+  // Parse the JSON string from Railway Environment Variable
+  credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+} catch (err) {
+  console.error(
+    "Could not parse Google Credentials from Environment. Check your variables.",
+  );
+  process.exit(1);
+}
+
 const auth = new google.auth.GoogleAuth({
-  keyFile: "service_account.json",
+  credentials: credentials, // Pass the object directly
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 // REPLACE THIS WITH YOUR ACTUAL SPREADSHEET ID (from the URL)
