@@ -5,85 +5,110 @@ const cors = require("cors");
 require("dotenv").config();
 
 const app = express();
+
+/* =====================
+   Middleware
+===================== */
 app.use(cors());
 app.use(bodyParser.json());
 
-// Database Pool
+/* =====================
+   Environment
+===================== */
+const PORT = process.env.PORT || 3000;
+
+/* =====================
+   MySQL Connection Pool
+===================== */
 const pool = mysql.createPool({
   host: process.env.DB_HOST,
   user: process.env.DB_USER,
   password: process.env.DB_PASSWORD,
   database: process.env.DB_NAME,
-  port: process.env.DB_PORT,
+  port: Number(process.env.DB_PORT) || 3306,
   waitForConnections: true,
   connectionLimit: 10,
   queueLimit: 0,
 });
 
-// Helper: Check and Add Columns Dynamically
+/* =====================
+   Health + Root Routes
+===================== */
+app.get("/", (req, res) => {
+  res.send("Sheets → MySQL Sync API running 🚀");
+});
+
+app.get("/health", (req, res) => {
+  res.status(200).json({ status: "ok" });
+});
+
+/* =====================
+   Helper: Ensure Columns
+===================== */
 async function ensureColumnsExist(rowData) {
   const keys = Object.keys(rowData);
   if (keys.length === 0) return;
 
-  // Get current columns in the table
-  const [columns] = await pool.query(`SHOW COLUMNS FROM sheet_sync`);
+  const [columns] = await pool.query("SHOW COLUMNS FROM sheet_sync");
   const existingColumns = columns.map((col) => col.Field);
 
-  // Find missing columns
   const missingColumns = keys.filter(
     (key) => !existingColumns.includes(key) && key !== "_sheet_row_id",
   );
 
-  // Add missing columns dynamically
   for (const col of missingColumns) {
-    // We use TEXT to be safe for all data types (numbers, strings, dates)
-    // Sanitizing column name to prevent SQL Injection
     const safeCol = col.replace(/[^a-zA-Z0-9_]/g, "_");
     console.log(`Creating new column: ${safeCol}`);
     try {
       await pool.query(`ALTER TABLE sheet_sync ADD COLUMN ${safeCol} TEXT`);
     } catch (err) {
-      console.error(`Error adding column ${safeCol}:`, err);
+      console.error(`Error adding column ${safeCol}:`, err.message);
     }
   }
 }
 
-// Endpoint: Receive Data from Google Sheets
+/* =====================
+   Sync Endpoint
+===================== */
 app.post("/sync-from-sheet", async (req, res) => {
   try {
-    const { row_id, data } = req.body; // data is an object like { "Name": "Abhinav", "Role": "Dev" }
+    const { row_id, data } = req.body;
 
-    if (!row_id || !data) {
-      return res.status(400).send("Missing row_id or data");
+    if (!row_id || !data || typeof data !== "object") {
+      return res.status(400).json({
+        error: "Missing or invalid row_id or data",
+      });
     }
 
-    // 1. Ensure table structure matches the incoming data
+    // Ensure table schema
     await ensureColumnsExist(data);
 
-    // 2. Prepare Query
-    // We use INSERT ... ON DUPLICATE KEY UPDATE to handle both new rows and edits
-    const keys = Object.keys(data).filter((k) => k !== "row_id");
+    const keys = Object.keys(data);
     const values = keys.map((k) => data[k]);
 
-    // Construct safe dynamic query
-    const setClause = keys.map((k) => `${k} = ?`).join(", ");
+    const columnsSql = keys.join(", ");
+    const placeholders = keys.map(() => "?").join(", ");
+    const updateClause = keys.map((k) => `${k} = VALUES(${k})`).join(", ");
+
     const sql = `
-            INSERT INTO sheet_sync (_sheet_row_id, ${keys.join(", ")}) 
-            VALUES (?, ${keys.map(() => "?").join(", ")}) 
-            ON DUPLICATE KEY UPDATE ${setClause}
-        `;
+      INSERT INTO sheet_sync (_sheet_row_id, ${columnsSql})
+      VALUES (?, ${placeholders})
+      ON DUPLICATE KEY UPDATE ${updateClause}
+    `;
 
-    // Execute
-    await pool.query(sql, [row_id, ...values, ...values]);
+    await pool.query(sql, [row_id, ...values]);
 
-    console.log(`Synced Row ${row_id}`);
-    res.status(200).send({ status: "success" });
-  } catch (error) {
-    console.error("Sync Error:", error);
-    res.status(500).send(error.message);
+    console.log(`✅ Synced row ${row_id}`);
+    res.status(200).json({ status: "success" });
+  } catch (err) {
+    console.error("❌ Sync error:", err);
+    res.status(500).json({ error: err.message });
   }
 });
 
-app.listen(process.env.PORT, () => {
-  console.log(`Server running on port ${process.env.PORT}`);
+/* =====================
+   Start Server
+===================== */
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
