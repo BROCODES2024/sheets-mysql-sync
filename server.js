@@ -28,15 +28,26 @@ const pool = mysql.createPool({
 // Google Auth Setup
 let auth;
 try {
-  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  let serviceAccount = process.env.GOOGLE_SERVICE_ACCOUNT;
+
+  // SMART CHECK: If it doesn't look like JSON (doesn't start with "{"), assume it's Base64 and decode it
+  if (serviceAccount && !serviceAccount.trim().startsWith("{")) {
+    serviceAccount = Buffer.from(serviceAccount, "base64").toString("utf-8");
+  }
+
+  const credentials = JSON.parse(serviceAccount);
+
   auth = new google.auth.GoogleAuth({
     credentials,
     scopes: ["https://www.googleapis.com/auth/spreadsheets"],
   });
+  console.log("Google Auth Configured Successfully!");
 } catch (error) {
+  console.error("CRITICAL ERROR: Could not parse GOOGLE_SERVICE_ACCOUNT.");
   console.error(
-    "Error parsing GOOGLE_SERVICE_ACCOUNT. Is the variable set in Railway?",
+    "Make sure the Railway variable matches your local method (Base64 vs Raw JSON).",
   );
+  console.error("Error details:", error.message);
 }
 
 // Track the last sync time to avoid re-reading old data
