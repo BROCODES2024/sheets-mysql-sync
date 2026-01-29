@@ -2,11 +2,16 @@ const express = require("express");
 const mysql = require("mysql2/promise");
 const bodyParser = require("body-parser");
 const cors = require("cors");
+const { google } = require("googleapis");
 require("dotenv").config();
 
 const app = express();
 app.use(cors());
 app.use(bodyParser.json());
+
+// --- CONFIGURATION ---
+// REPLACE THIS with your actual Spreadsheet ID (from your URL)
+const SPREADSHEET_ID = "1JQTJlDVkvYToA4qoIMVhncRsnvBURCjPC_x5mn44_0E";
 
 // Database Pool
 const pool = mysql.createPool({
@@ -20,52 +25,59 @@ const pool = mysql.createPool({
   queueLimit: 0,
 });
 
-// Helper: Check and Add Columns Dynamically
+// Google Auth Setup
+let auth;
+try {
+  const credentials = JSON.parse(process.env.GOOGLE_SERVICE_ACCOUNT);
+  auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"],
+  });
+} catch (error) {
+  console.error(
+    "Error parsing GOOGLE_SERVICE_ACCOUNT. Is the variable set in Railway?",
+  );
+}
+
+// Track the last sync time to avoid re-reading old data
+let lastSyncTime = new Date();
+
+// --- HELPER FUNCTIONS ---
+
 async function ensureColumnsExist(rowData) {
   const keys = Object.keys(rowData);
   if (keys.length === 0) return;
 
-  // Get current columns in the table
   const [columns] = await pool.query(`SHOW COLUMNS FROM sheet_sync`);
   const existingColumns = columns.map((col) => col.Field);
-
-  // Find missing columns
   const missingColumns = keys.filter(
     (key) => !existingColumns.includes(key) && key !== "_sheet_row_id",
   );
 
-  // Add missing columns dynamically
   for (const col of missingColumns) {
-    // We use TEXT to be safe for all data types (numbers, strings, dates)
-    // Sanitizing column name to prevent SQL Injection
     const safeCol = col.replace(/[^a-zA-Z0-9_]/g, "_");
-    console.log(`Creating new column: ${safeCol}`);
     try {
       await pool.query(`ALTER TABLE sheet_sync ADD COLUMN ${safeCol} TEXT`);
+      console.log(`Added column: ${safeCol}`);
     } catch (err) {
       console.error(`Error adding column ${safeCol}:`, err);
     }
   }
 }
 
-// Endpoint: Receive Data from Google Sheets
+// --- ENDPOINTS ---
+
 app.post("/sync-from-sheet", async (req, res) => {
   try {
-    const { row_id, data } = req.body; // data is an object like { "Name": "Abhinav", "Role": "Dev" }
+    const { row_id, data } = req.body;
 
-    if (!row_id || !data) {
-      return res.status(400).send("Missing row_id or data");
-    }
+    if (!row_id || !data) return res.status(400).send("Missing row_id or data");
 
-    // 1. Ensure table structure matches the incoming data
     await ensureColumnsExist(data);
 
-    // 2. Prepare Query
-    // We use INSERT ... ON DUPLICATE KEY UPDATE to handle both new rows and edits
     const keys = Object.keys(data).filter((k) => k !== "row_id");
     const values = keys.map((k) => data[k]);
 
-    // Construct safe dynamic query
     const setClause = keys.map((k) => `${k} = ?`).join(", ");
     const sql = `
             INSERT INTO sheet_sync (_sheet_row_id, ${keys.join(", ")}) 
@@ -73,16 +85,67 @@ app.post("/sync-from-sheet", async (req, res) => {
             ON DUPLICATE KEY UPDATE ${setClause}
         `;
 
-    // Execute
     await pool.query(sql, [row_id, ...values, ...values]);
 
-    console.log(`Synced Row ${row_id}`);
+    // IMPORTANT: Update time so the poller doesn't send this back
+    lastSyncTime = new Date();
+
+    console.log(`Synced Row ${row_id} from Sheet`);
     res.status(200).send({ status: "success" });
   } catch (error) {
     console.error("Sync Error:", error);
     res.status(500).send(error.message);
   }
 });
+
+// --- POLLING WORKER (MySQL -> Sheets) ---
+setInterval(async () => {
+  if (!auth) return;
+
+  try {
+    // 1. Get rows modified AFTER the last sync
+    const [rows] = await pool.query(
+      `SELECT * FROM sheet_sync WHERE updated_at > ?`,
+      [lastSyncTime],
+    );
+
+    if (rows.length === 0) return;
+
+    console.log(`Found ${rows.length} DB updates. Pushing to Sheet...`);
+    const sheets = google.sheets({ version: "v4", auth });
+
+    // 2. Push updates
+    for (const row of rows) {
+      const sheetRowId = row._sheet_row_id;
+
+      // Get Headers to map data correctly
+      const headerRes = await sheets.spreadsheets.values.get({
+        spreadsheetId: SPREADSHEET_ID,
+        range: "Sheet1!1:1",
+      });
+      const headers = headerRes.data.values[0];
+
+      // Map DB columns to Sheet Order
+      const rowDataArray = headers.map((header) => {
+        // Try exact match or match with underscores
+        return row[header] || row[header.replace(/ /g, "_")] || "";
+      });
+
+      // Update Sheet
+      await sheets.spreadsheets.values.update({
+        spreadsheetId: SPREADSHEET_ID,
+        range: `Sheet1!A${sheetRowId}`,
+        valueInputOption: "RAW",
+        requestBody: { values: [rowDataArray] },
+      });
+    }
+
+    // Reset Clock
+    lastSyncTime = new Date();
+  } catch (err) {
+    console.error("Polling Error:", err);
+  }
+}, 5000); // Runs every 5 seconds
 
 app.listen(process.env.PORT, () => {
   console.log(`Server running on port ${process.env.PORT}`);
