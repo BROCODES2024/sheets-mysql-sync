@@ -75,7 +75,39 @@ async function ensureColumnsExist(rowData) {
     }
   }
 }
+// --- FRONTEND ENDPOINTS ---
 
+// 1. Get All Data
+app.get("/data", async (req, res) => {
+  try {
+    // Order by created_at desc so new rows show on top
+    const [rows] = await pool.query(
+      "SELECT * FROM sheet_sync ORDER BY created_at DESC",
+    );
+    res.json(rows);
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
+
+// 2. Update a Cell (from Frontend)
+app.put("/update", async (req, res) => {
+  try {
+    const { id, column, value } = req.body;
+
+    // Security: Ensure column name is safe (avoid SQL injection)
+    const safeColumn = column.replace(/[^a-zA-Z0-9_]/g, "_");
+
+    await pool.query(`UPDATE sheet_sync SET ${safeColumn} = ? WHERE id = ?`, [
+      value,
+      id,
+    ]);
+
+    res.json({ success: true });
+  } catch (error) {
+    res.status(500).send(error.message);
+  }
+});
 // --- ENDPOINTS ---
 
 app.post("/sync-from-sheet", async (req, res) => {
