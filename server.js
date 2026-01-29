@@ -157,16 +157,18 @@ setInterval(async () => {
     console.log(`Found ${rows.length} DB updates. Pushing to Sheet...`);
     const sheets = google.sheets({ version: "v4", auth });
 
+    // --- OPTIMIZATION START ---
+    // Fetch headers ONCE for this batch, not inside the loop
+    const headerRes = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: "Sheet1!1:1",
+    });
+    const headers = headerRes.data.values[0];
+    // --- OPTIMIZATION END ---
+
     // 2. Push updates
     for (const row of rows) {
       const sheetRowId = row._sheet_row_id;
-
-      // Get Headers to map data correctly
-      const headerRes = await sheets.spreadsheets.values.get({
-        spreadsheetId: SPREADSHEET_ID,
-        range: "Sheet1!1:1",
-      });
-      const headers = headerRes.data.values[0];
 
       // Map DB columns to Sheet Order
       const rowDataArray = headers.map((header) => {
